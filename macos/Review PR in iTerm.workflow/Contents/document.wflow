@@ -61,8 +61,16 @@
 					<key>COMMAND_STRING</key>
 					<string># Review PR in iTerm: opens prr for the GitHub PR link in the selection, else the one on the clipboard
 re='https://github\.com/[^/]+/[^/]+/pull/[0-9]+'
-url=$(print -r -- "$*" | grep -oE "$re" | head -1)
-[[ -n $url ]] || url=$(pbpaste | grep -oE "$re" | head -1)
+short='[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+'  # how Slack's GitHub unfurls name a PR: owner/repo#123
+# The selected text is logged so a link that isn't recognised can be diagnosed
+print -r -- "$(date '+%F %T') input: $*" &gt;&gt; ~/Library/Logs/prr-service.log
+pr_from() {
+  local u=$(print -r -- "$1" | grep -oE "$re" | head -1)
+  [[ -z $u ]] &amp;&amp; u=$(print -r -- "$1" | grep -oE "$short" | head -1) &amp;&amp; [[ -n $u ]] &amp;&amp; u="https://github.com/${u%#*}/pull/${u##*#}"
+  print -r -- $u
+}
+url=$(pr_from "$*")
+[[ -n $url ]] || url=$(pr_from "$(pbpaste)")
 if [[ -z $url ]]; then
   osascript -e 'display notification "No GitHub PR link in the selection or on the clipboard" with title "Review PR"'
   exit 0

@@ -294,6 +294,8 @@ esac
 url=${1:-}
 if [[ -n $url ]]; then
   [[ $url =~ ^[0-9]+$ ]] && url=$(gh pr view "$url" --json url -q .url)
+  # owner/repo#123, as Slack's GitHub unfurls and gh print it
+  [[ $url =~ '^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([0-9]+)$' ]] && url="https://github.com/$match[1]/pull/$match[2]"
   url=$(print -r -- "$url" | grep -oE "$PR_RE") || die "Not a GitHub PR URL: $1"
   viewer $url
 elif url=$(pbpaste | grep -oE "$PR_RE" | head -1) && [[ -n $url ]]; then
