@@ -10,7 +10,7 @@
 autoload -U colors && colors
 
 SELF=${0:A}
-PR_RE='https://github\.com/[^/]+/[^/]+/pull/[0-9]+'
+PR_RE='(https?://)?(www\.)?github\.com/[^/ ]+/[^/ ]+/pull/[0-9]+'  # links copied from Slack can lack https://
 CACHE=${TMPDIR:-/tmp}/prr-cache
 
 die() { print -P "%F{red}$*%f" >&2; exit 1 }
@@ -296,10 +296,11 @@ if [[ -n $url ]]; then
   [[ $url =~ ^[0-9]+$ ]] && url=$(gh pr view "$url" --json url -q .url)
   # owner/repo#123, as Slack's GitHub unfurls and gh print it
   [[ $url =~ '^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([0-9]+)$' ]] && url="https://github.com/$match[1]/pull/$match[2]"
-  url=$(print -r -- "$url" | grep -oE "$PR_RE") || die "Not a GitHub PR URL: $1"
+  url=$(print -r -- "$url" | grep -oE "$PR_RE" | head -1) && [[ -n $url ]] || die "Not a GitHub PR URL: $1"
+  url="https://github.com/${url#*github.com/}"
   viewer $url
 elif url=$(pbpaste | grep -oE "$PR_RE" | head -1) && [[ -n $url ]]; then
-  viewer $url
+  viewer "https://github.com/${url#*github.com/}"
 else
   # No URL: work through the review queue until you quit the list.
   while url=$(picker) && [[ -n $url ]]; do viewer $url; done

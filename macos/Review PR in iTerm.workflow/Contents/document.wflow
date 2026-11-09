@@ -60,12 +60,13 @@
 				<dict>
 					<key>COMMAND_STRING</key>
 					<string># Review PR in iTerm: opens prr for the GitHub PR link in the selection, else the one on the clipboard
-re='https://github\.com/[^/]+/[^/]+/pull/[0-9]+'
+re='(https?://)?(www\.)?github\.com/[^/ ]+/[^/ ]+/pull/[0-9]+'  # Slack drops the https://
 short='[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+'  # how Slack's GitHub unfurls name a PR: owner/repo#123
 # The selected text is logged so a link that isn't recognised can be diagnosed
 print -r -- "$(date '+%F %T') input: $*" &gt;&gt; ~/Library/Logs/prr-service.log
 pr_from() {
   local u=$(print -r -- "$1" | grep -oE "$re" | head -1)
+  [[ -n $u ]] &amp;&amp; u="https://github.com/${u#*github.com/}"
   [[ -z $u ]] &amp;&amp; u=$(print -r -- "$1" | grep -oE "$short" | head -1) &amp;&amp; [[ -n $u ]] &amp;&amp; u="https://github.com/${u%#*}/pull/${u##*#}"
   print -r -- $u
 }
