@@ -1,0 +1,304 @@
+#!/bin/zsh
+# prr: review, approve and merge a GitHub PR in one full-screen view.
+#
+#   prr <pr-url>   open that PR
+#   prr            open the PR URL on the clipboard, or pick from PRs awaiting your review
+#
+# In the viewer: ←/→ switch between description, diff and checks · ↑/↓ scroll
+# space page down (expands folded sections on the description) · enter full-screen diff
+# a approve · m merge · r refresh · o browser · q back to description, then quit
+autoload -U colors && colors
+
+SELF=${0:A}
+PR_RE='https://github\.com/[^/]+/[^/]+/pull/[0-9]+'
+CACHE=${TMPDIR:-/tmp}/prr-cache
+
+die() { print -P "%F{red}$*%f" >&2; exit 1 }
+
+# ---- cached data -------------------------------------------------------------
+
+cache_dir() { print -r -- $CACHE/${${1#https://github.com/}//\//_} }
+
+pr_json() {
+  local d=$(cache_dir $1); mkdir -p $d
+  [[ -s $d/view.json ]] || gh pr view "$1" --json number,title,body,author,state,isDraft,baseRefName,headRefName,additions,deletions,changedFiles,files,reviewDecision,mergeStateStatus,statusCheckRollup,latestReviews >| $d/view.json
+  cat $d/view.json
+}
+
+# The viewer's single list row: title, then PR url (field 2, which every binding uses).
+pr_row() { pr_json $1 | jq -r --arg url $1 '"#\(.number) \(.title)\t\($url)"' }
+
+pr_diff() {
+  local d=$(cache_dir $1); mkdir -p $d
+  # Written to a temp file first: the viewer prefetches this in the background while a preview may read it
+  [[ -s $d/diff ]] || { gh pr diff "$1" --color=never >| $d/diff.$$ && mv $d/diff.$$ $d/diff }
+  cat $d/diff
+}
+
+# ---- views (run as fzf previews) -------------------------------------------------
+
+# Collapses <details> blocks to their summary line, as GitHub shows them; space expands / folds them all.
+fold_details() {
+  local expanded=0; [[ -e $(cache_dir $1)/expanded ]] && expanded=1
+  EXPANDED=$expanded perl -0777 -pe '
+    my $strip = sub { (my $t = shift) =~ s/<[^>]+>//g; $t =~ s/^\s+|\s+$//g; $t };
+    s{!\[([^\]]*)\]\([^)]*\)}{$1}g;  # images (badges) are just noise in a terminal; keep their alt text
+    if ($ENV{EXPANDED}) {
+      s{<details[^>]*>\s*(?:<summary>(.*?)</summary>)?}{"\n**▾ " . $strip->($1 // "Details") . "** · *space to fold*\n\n"}gse;
+      s{</details>}{\n}g;
+    } else {
+      1 while s{<details[^>]*>\s*(?:<summary>(.*?)</summary>)?(?:(?!<details).)*?</details>}{"\n**▸ " . $strip->($1 // "Details") . "** · *space to expand*\n"}se;
+    }'
+}
+
+view_desc() {
+  local w=${FZF_PREVIEW_COLUMNS:-100} json
+  json=$(pr_json $1) || return
+  print -r -- $json | jq -r '
+    def checks: [.statusCheckRollup[]? | (.conclusion // .state // .status)
+      | if IN("SUCCESS","NEUTRAL","SKIPPED") then "\u001b[32m✓\u001b[0m"
+        elif IN("FAILURE","ERROR","CANCELLED","TIMED_OUT","ACTION_REQUIRED","STARTUP_FAILURE") then "\u001b[31m✗\u001b[0m"
+        else "\u001b[33m•\u001b[0m" end];
+    (checks | group_by(.) | map("\(length)\(.[0])") | join(" ")) as $c |
+    ([.latestReviews[]? | "\(.author.login) \(.state | ascii_downcase)"] | join(", ")) as $r |
+    "\u001b[1m#\(.number) \(.title)\u001b[0m",
+    "@\(.author.login)  \(.headRefName) → \(.baseRefName)  \u001b[32m+\(.additions)\u001b[0m \u001b[31m-\(.deletions)\u001b[0m in \(.changedFiles) files",
+    "\(.state)\(if .isDraft then " (draft)" else "" end) · review: \(.reviewDecision // "none")\(if $r != "" then " (\($r))" else "" end) · merge: \(.mergeStateStatus) · checks: \(if $c == "" then "none" else $c end)"'
+  print -r -- ${(l:$w::─:)}
+  local body=$(print -r -- $json | jq -r '.body // ""' | fold_details $1)
+  if [[ -n ${body//[[:space:]]/} ]]; then
+    # glow pads every line to full width with styled spaces; strip that so fzf's wrap doesn't add blank lines
+    print -r -- $body | glow -s dark -w $((w - 2)) - 2>/dev/null | perl -pe 's/(?:\e\[[0-9;]*m|[ \t])+$/\e[0m/' || print -r -- $body
+  else
+    print -P "%F{8}(no description)%f"
+  fi
+  print -r -- ${(l:$w::─:)}
+  print -P "%BFiles%b"
+  print -r -- $json | jq -r '.files[] | "  \u001b[32m+\(.additions)\u001b[0m\t\u001b[31m-\(.deletions)\u001b[0m\t\(.path)"' | column -t -s $'\t'
+}
+
+view_diff() {
+  pr_diff $1 | delta --paging=never --width=${FZF_PREVIEW_COLUMNS:-100}
+}
+
+# Tab-separated check rows, failures first: icon, name, workflow, duration, description, link.
+check_rows() {
+  gh pr checks "$1" --json bucket,name,workflow,link,startedAt,completedAt,description -q '
+    def order: {"fail":0,"pending":1,"pass":2,"skipping":3,"cancel":4}[.bucket] // 5;
+    def secs($t): $t | sub("\\.[0-9]+";"") | fromdateiso8601;
+    def dur: if (.startedAt // "") == "" or (.completedAt // "") == "" or (.completedAt | startswith("0001")) then ""
+      else (secs(.completedAt) - secs(.startedAt)) as $d
+        | if $d <= 0 then "" elif $d >= 60 then "\($d / 60 | floor)m\($d % 60)s" else "\($d)s" end end;
+    sort_by(order, .workflow, .name) | .[] |
+    [(if .bucket == "pass" then "\u001b[32m✓\u001b[0m" elif .bucket == "fail" then "\u001b[31m✗\u001b[0m"
+      elif .bucket == "pending" then "\u001b[33m•\u001b[0m" else "\u001b[90m-\u001b[0m" end),
+     .name, "\u001b[90m\(.workflow)\u001b[0m", dur, "\u001b[90m\(.description)\u001b[0m", .link] | join("\t")' 2>/dev/null
+}
+
+# One line like "1 failed · 6 passed · 4 skipped" from check rows.
+check_summary() {
+  cut -f1 | sed 's/\x1b\[[0-9;]*m//g' |
+    awk '{n[$1]++} END {split("✗ failed,• pending,✓ passed,- skipped", o, ",")
+      for (i = 1; i <= 4; i++) { split(o[i], p, " "); if (n[p[1]]) printf "%s%d %s", (s++ ? " · " : ""), n[p[1]], p[2] }; print "" }'
+}
+
+# Details for one check: steps for GitHub Actions jobs, plus the failing log when it failed.
+view_check() {
+  local link=$1 icon=$2 name=$3 workflow=$4
+  print -r -- "$icon ${(%):-%B}$name${(%):-%b}  $workflow"
+  print -r -- $'\e]8;;'"$link"$'\e\\'"${link:0:100}"$'\e]8;;\e\\'
+  print
+  if [[ $link =~ 'github\.com/([^/]+/[^/]+)/actions/runs/[0-9]+/job/([0-9]+)' ]]; then
+    local repo=$match[1] job=$match[2]
+    gh run view --job $job -R $repo 2>&1
+    [[ $icon == *✗* ]] && { print -P "\n%BFailed log%b"; gh run view --job $job -R $repo --log-failed 2>&1 | tail -150 }
+  else
+    print -P "%F{8}Not a GitHub Actions job, so there are no details here. Enter opens it in the browser.%f"
+  fi
+}
+
+# Check rows, cached like the diff so the Checks view opens instantly.
+pr_checks() {
+  local d=$(cache_dir $1); mkdir -p $d
+  [[ -e $d/checks ]] || { check_rows $1 >| $d/checks.$$; mv $d/checks.$$ $d/checks }
+  cat $d/checks
+}
+
+# fzf rows for the Checks view: aligned "icon name duration", then PR url, link, icon, name, workflow.
+checks_list() {
+  local rows=$(pr_checks $1)
+  [[ -n $rows ]] || { print -r -- $'\e[90m-\e[0m No checks reported\t'"$1"$'\t\t\t\t'; return }
+  print -r -- $rows | awk -F'\t' -v url=$1 '
+    { l[NR] = $0; if (length($2) > w) w = length($2) }
+    END { for (i = 1; i <= NR; i++) { split(l[i], f, "\t")
+      printf "%s %-*s  \033[90m%s\033[0m\t%s\t%s\t%s\t%s\t%s\n", f[1], w, f[2], f[4], url, f[6], f[1], f[2], f[3] } }'
+}
+
+# ---- actions (run from fzf, full screen) --------------------------------------------
+
+act_approve() {
+  local body
+  read -r "body?Approval comment (Enter for none, ctrl-c to cancel): " </dev/tty || return 0
+  gh pr review "$1" --approve ${body:+--body "$body"}
+}
+
+# Merges with your usual method for that repo; offers auto-merge when checks or rules still block it.
+act_merge() {
+  local url=$1 repo=${${1#https://github.com/}%/pull/*} info decision state author base me method
+  info=$(gh pr view "$url" --json reviewDecision,mergeStateStatus,author,baseRefName -q '"\(.reviewDecision)|\(.mergeStateStatus)|\(.author.login)|\(.baseRefName)"')
+  IFS='|' read -r decision state author base <<< "$info"
+  me=$(gh api user -q .login)
+  if [[ $decision != APPROVED && $author != $me ]]; then
+    if read -q "?Not approved yet. Approve first? [y/N] " </dev/tty; then
+      print; act_approve "$url"
+      state=$(gh pr view "$url" --json mergeStateStatus -q .mergeStateStatus)
+    else
+      print
+    fi
+  fi
+  method=${(L)$(gh repo view "$repo" --json viewerDefaultMergeMethod -q .viewerDefaultMergeMethod)}
+  local -a flags=(--$method)
+  if [[ $state != (CLEAN|HAS_HOOKS) ]]; then
+    print -P "%F{yellow}Can't merge right now (merge state: $state).%f"
+    read -q "?Enable auto-merge ($method) so it merges when checks and rules pass? [y/N] " </dev/tty || return 0
+    print; flags+=(--auto)
+  else
+    read -q "?${method:u} merge into $base? [y/N] " </dev/tty || return 0
+    print
+  fi
+  gh pr merge "$url" "${flags[@]}"
+}
+
+# Runs an action, keeps its output on screen until a key is pressed, then drops the cache.
+run_action() {
+  local act=$1 url=$2
+  clear
+  act_$act "$url"
+  print -P "\n%F{8}Press any key to go back%f"; read -k1 </dev/tty
+  rm -rf $(cache_dir $url)
+}
+
+# ---- viewer --------------------------------------------------------------------
+
+HELP='← → switch view · ↑ ↓ scroll · space fold / page · enter full-screen diff · a approve · m merge · r refresh · o browser · q back / quit'
+CHECKS_HELP='← → switch view · ↑ ↓ choose check · enter open check in browser · a approve · m merge · r refresh · q back'
+VIEWS=(desc diff checks)
+NAMES=(Description Diff Checks)
+
+# Preview label listing every view, the current one highlighted.
+view_label() {
+  local i out=''
+  for i in {1..$#NAMES}; do
+    (( i == $1 )) && out+=$'\e[7m '"$NAMES[i]"$' \e[0m ' || out+=" $NAMES[i]  "
+  done
+  print -rn -- " $out"
+}
+
+# fzf transform: prints the actions that show view $1 (an index into VIEWS) for PR $2.
+# Everything happens inside one fzf: Checks swaps the list to the checks and the preview to the right.
+# $3 = 1 when the list must be reloaded (switching to or from Checks, or refreshing).
+show_view() {
+  local view=$VIEWS[$1] label=$(view_label $1) reload=${3:-0}
+  if [[ $view == checks ]]; then
+    print -rn -- "reload-sync($SELF __checklist {2})+change-preview($SELF __view check {3} {4} {5} {6})"
+    print -rn -- "+change-preview-label($label)+change-preview-window(right,68%,border-left,wrap)"
+    print -rn -- "+change-header($CHECKS_HELP   ·   $(pr_checks $2 | check_summary))+first"
+  else
+    local wrap=wrap; [[ $view == diff ]] && wrap=nowrap
+    (( reload )) && print -rn -- "reload-sync($SELF __row {2})+"
+    print -rn -- "change-preview($SELF __view $view {2})+change-preview-label($label)"
+    print -rn -- "+change-preview-window(up,95%,border-bottom,$wrap)+change-header($HELP)+preview-top"
+  fi
+}
+
+# Handles keys whose meaning depends on the current view (read from the highlighted label).
+nav() {
+  local cur i url=$2
+  for i in {1..$#NAMES}; do [[ $FZF_PREVIEW_LABEL == *$'\e[7m '"$NAMES[i]"* ]] && cur=$i; done
+  : ${cur:=1}
+  local on_checks=0; [[ $VIEWS[$cur] == checks ]] && on_checks=1
+  # Reload the list when moving between Checks and the other views
+  go() { local reload=$on_checks; [[ $VIEWS[$1] == checks ]] && reload=1; show_view $1 $url $reload }
+  case $1 in
+    right)   go $(( cur % $#VIEWS + 1 )) ;;
+    left)    go $(( (cur + $#VIEWS - 2) % $#VIEWS + 1 )) ;;
+    quit)    (( cur == 1 )) && print -rn -- abort || go 1 ;;
+    refresh) show_view $cur $url 1 ;;
+    enter)   (( on_checks )) && print -rn -- "execute-silent(open {3})" || print -rn -- "execute($SELF __view diff-pager {2})" ;;
+    # Space folds / unfolds sections on a description that has them, and pages everywhere else
+    space)
+      if [[ $VIEWS[$cur] == desc ]] && grep -q '<details' $(cache_dir $url)/view.json 2>/dev/null; then
+        print -rn -- "execute-silent($SELF __fold {2})+refresh-preview"
+      else
+        print -rn -- preview-page-down
+      fi ;;
+  esac
+}
+
+viewer() {
+  local url=$1 title
+  rm -rf $(cache_dir $url)  # always start from fresh data
+  title=$(pr_json $url | jq -r '"#\(.number) \(.title)"') || die "Can't load $url"
+  # Fetch the diff and checks in the background so switching to them is instant
+  { pr_diff $url; pr_checks $url } >/dev/null 2>&1 &!
+  print -r -- "$title"$'\t'"$url" | fzf --no-input --with-nth=1 --delimiter=$'\t' \
+    --layout=reverse --height=100% --header="$HELP" --header-first --ansi \
+    --preview="$SELF __view desc {2}" --preview-label="$(view_label 1)" \
+    --preview-window='up,95%,border-bottom,wrap' \
+    --bind="right:transform($SELF __nav right {2})" \
+    --bind="left:transform($SELF __nav left {2})" \
+    --bind="q:transform($SELF __nav quit {2}),esc:transform($SELF __nav quit {2})" \
+    --bind="enter:transform($SELF __nav enter {2})" \
+    --bind="a:execute($SELF __act approve {2})+refresh-preview" \
+    --bind="m:execute($SELF __act merge {2})+refresh-preview" \
+    --bind="o:execute-silent(gh pr view --web {2})" \
+    --bind="r:execute-silent($SELF __clear {2})+transform($SELF __nav refresh {2})" \
+    --bind="space:transform($SELF __nav space {2})" \
+    --bind='down:preview-down+down,up:preview-up+up' >/dev/null  # scrolls the text views, moves through checks
+  return 0
+}
+
+# Lists PRs requesting your review, with the description previewed; Enter opens the viewer.
+picker() {
+  local rows
+  rm -rf $CACHE
+  rows=$(gh search prs --review-requested=@me --state=open --limit 100 --sort updated \
+    --json url,title,repository,author \
+    -q '.[] | "\(.repository.nameWithOwner)#\(.url|split("/")|last)\t\(.title)\t\(if (.author.login // "") == "" then "bot" else "@" + .author.login end)\t\(.url)"') || return 1
+  [[ -n $rows ]] || { print "No PRs are waiting for your review."; return 1 }
+  print -r -- "$rows" | fzf --delimiter=$'\t' --with-nth=1,2,3 --layout=reverse --height=100% \
+    --prompt='review> ' --header='Enter: open · Esc: quit · type to filter' \
+    --preview="$SELF __view desc {4}" --preview-window='down,65%,border-top,wrap' |
+    cut -f4
+}
+
+# ---- entry point -------------------------------------------------------------------
+
+case ${1:-} in
+  __view)
+    case $2 in
+      desc) view_desc $3 ;;
+      diff) view_diff $3 ;;
+      diff-pager) pr_diff $3 | delta --paging=always --navigate ;;
+      check) view_check $3 $4 $5 $6 ;;
+    esac
+    exit ;;
+  __act) run_action $2 $3; exit ;;
+  __clear) d=$(cache_dir $2); rm -f $d/view.json $d/diff $d/checks; pr_json $2 >/dev/null; { pr_diff $2; pr_checks $2 } >/dev/null 2>&1 &!; exit ;;
+  __fold) f=$(cache_dir $2)/expanded; [[ -e $f ]] && rm $f || touch $f; exit ;;
+  __checklist) checks_list $2; exit ;;
+  __row) pr_row $2; exit ;;
+  __nav) nav $2 $3; exit ;;
+esac
+
+url=${1:-}
+if [[ -n $url ]]; then
+  [[ $url =~ ^[0-9]+$ ]] && url=$(gh pr view "$url" --json url -q .url)
+  url=$(print -r -- "$url" | grep -oE "$PR_RE") || die "Not a GitHub PR URL: $1"
+  viewer $url
+elif url=$(pbpaste | grep -oE "$PR_RE" | head -1) && [[ -n $url ]]; then
+  viewer $url
+else
+  # No URL: work through the review queue until you quit the list.
+  while url=$(picker) && [[ -n $url ]]; do viewer $url; done
+fi
