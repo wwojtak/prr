@@ -76,24 +76,21 @@ if [[ -z $url ]]; then
   osascript -e 'display notification "No GitHub PR link found. Copy the link first (right-click → Copy Link)" with title "Review PR"'
   exit 0
 fi
-# The app the Service was used from (usually Slack) gets focus back when prr quits. Otherwise iTerm stays
-# active with no window in this Space, and switching to iTerm wouldn't move to its other windows.
-back=$(lsappinfo info -only bundleid "$(lsappinfo front)" | grep -oE '"[^"]+"' | tr -d '"')
-[[ $back == com.googlecode.iterm2 ]] &amp;&amp; back=
 # Login shell so prr finds gh, fzf, delta and glow on the Homebrew PATH.
-# The window is created before iTerm is activated: activating first makes macOS jump to the Space
-# with iTerm's other windows. The "PR Review" profile opens it on the main display (the one with the menu bar).
-cmd="/bin/zsh -lc '\$HOME/.local/bin/prr $url${back:+; open -b $back}'"
+# iTerm is activated first, so macOS switches to the desktop with iTerm's windows and the PR opens there,
+# on the main display ("PR Review" profile). When prr quits, its window closes and you're back at the terminal.
+cmd="/bin/zsh -lc '\$HOME/.local/bin/prr $url'"
 osascript - "$cmd" &lt;&lt;'APPLESCRIPT'
 on run argv
   tell application "iTerm2"
+    activate
+    delay 0.3
     try
       set w to create window with profile "PR Review" command (item 1 of argv)
     on error
       set w to create window with default profile command (item 1 of argv)
     end try
     select w
-    activate
   end tell
 end run
 APPLESCRIPT</string>
