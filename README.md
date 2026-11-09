@@ -37,7 +37,7 @@ Approve and merge always ask before doing anything.
 - `prr <url>`. Any link into the PR works, for example to its files tab or a comment.
 - `prr` with a PR link on the clipboard opens that PR.
 - `prr` with no link on the clipboard lists the PRs waiting for your review, with a preview of each. Type to filter, `enter` opens one, `esc` quits.
-- **macOS, from any app:** select a PR link, or copy it, then right-click and choose **Services → Review PR in iTerm**. It understands full links, links without `https://` and `owner/repo#123`. If Slack passes only the PR's title, copy the link first (right-click → Copy Link). A new iTerm window opens on the PR, on the desktop where iTerm lives (on your main display, the one with the menu bar). It closes when you quit `prr`, leaving you at your terminal.
+- **macOS, from any app:** select a PR link, or copy it, then right-click and choose **Services → ▶ Review PR** (the ▶ keeps it at the top of the list). It understands full links, links without `https://` and `owner/repo#123`. If Slack passes only the PR's title, copy the link first (right-click → Copy Link). A new iTerm window opens on the PR, on the desktop where iTerm lives (on your main display, the one with the menu bar). It closes when you quit `prr`, leaving you at your terminal.
 
 ## Install
 
