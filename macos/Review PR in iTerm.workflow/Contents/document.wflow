@@ -70,7 +70,18 @@ pr_from() {
   [[ -z $u ]] &amp;&amp; u=$(print -r -- "$1" | grep -oE "$short" | head -1) &amp;&amp; [[ -n $u ]] &amp;&amp; u="https://github.com/${u%#*}/pull/${u##*#}"
   print -r -- $u
 }
+# Slack's GitHub unfurls sometimes pass only "#123 PR title": find that PR in your organisations
+pr_from_title() {
+  [[ $1 =~ '^#([0-9]+) (.+)$' ]] || return
+  local num=$match[1] title=$match[2] owners
+  owners=($(gh api user -q .login) $(gh api user/orgs -q '.[].login'))
+  # Search on the title's plain words (punctuation breaks GitHub search), then match number and exact title
+  gh search prs "${title//[^[:alnum:] ._-]/ }" --match title ${owners/#/--owner=} --limit 50 --json number,url,title |
+    jq -r --arg t "$title" --argjson n $num '.[] | select(.number == $n and .title == $t) | .url' | head -1
+}
+export PATH=/opt/homebrew/bin:$PATH  # Services run with a minimal PATH; gh lives here
 url=$(pr_from "$*")
+[[ -n $url ]] || url=$(pr_from_title "$*")
 [[ -n $url ]] || url=$(pr_from "$(pbpaste)")
 if [[ -z $url ]]; then
   osascript -e 'display notification "No GitHub PR link in the selection or on the clipboard" with title "Review PR"'
