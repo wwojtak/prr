@@ -54,14 +54,14 @@ fold_details() {
 view_desc() {
   local w=${FZF_PREVIEW_COLUMNS:-100} json
   json=$(pr_json $1) || return
-  print -r -- $json | jq -r '
+  print -r -- $json | jq -r --arg repo "${${1#https://github.com/}%/pull/*}" '
     def checks: [.statusCheckRollup[]? | (.conclusion // .state // .status)
       | if IN("SUCCESS","NEUTRAL","SKIPPED") then "\u001b[32m✓\u001b[0m"
         elif IN("FAILURE","ERROR","CANCELLED","TIMED_OUT","ACTION_REQUIRED","STARTUP_FAILURE") then "\u001b[31m✗\u001b[0m"
         else "\u001b[33m•\u001b[0m" end];
     (checks | group_by(.) | map("\(length)\(.[0])") | join(" ")) as $c |
     ([.latestReviews[]? | "\(.author.login) \(.state | ascii_downcase)"] | join(", ")) as $r |
-    "\u001b[1m#\(.number) \(.title)\u001b[0m",
+    "\u001b[90m\($repo)\u001b[0m  \u001b[1m#\(.number) \(.title)\u001b[0m",
     "@\(.author.login)  \(.headRefName) → \(.baseRefName)  \u001b[32m+\(.additions)\u001b[0m \u001b[31m-\(.deletions)\u001b[0m in \(.changedFiles) files",
     "\(.state)\(if .isDraft then " (draft)" else "" end) · review: \(.reviewDecision // "none")\(if $r != "" then " (\($r))" else "" end) · merge: \(.mergeStateStatus) · checks: \(if $c == "" then "none" else $c end)"'
   print -r -- ${(l:$w::─:)}
