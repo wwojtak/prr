@@ -70,36 +70,10 @@ pr_from() {
   [[ -z $u ]] &amp;&amp; u=$(print -r -- "$1" | grep -oE "$short" | head -1) &amp;&amp; [[ -n $u ]] &amp;&amp; u="https://github.com/${u%#*}/pull/${u##*#}"
   print -r -- $u
 }
-# Slack's GitHub unfurls sometimes pass only "#123 PR title": find that PR in your organisations
-pr_from_title() {
-  [[ $1 =~ '^#([0-9]+) (.+)$' ]] || return
-  local num=$match[1] title=$match[2] owners
-  owners=($(gh api user -q .login) $(gh api user/orgs -q '.[].login'))
-  # Search on the title's plain words (punctuation breaks GitHub search), then match number and exact title
-  gh search prs "${title//[^[:alnum:] ._-]/ }" --match title ${owners/#/--owner=} --limit 50 --json number,url,title |
-    jq -r --arg t "$title" --argjson n $num '.[] | select(.number == $n and .title == $t) | .url' | sort -u | {
-      local -a urls=(${(f)"$(cat)"})
-      (( $#urls &lt;= 1 )) &amp;&amp; { print -r -- $urls; return }
-      # Same number and title in several repos (common for release PRs): ask, never guess
-      osascript - $urls &lt;&lt;'CHOOSE'
-on run argv
-  set repos to {}
-  repeat with u in argv
-    set end of repos to text 20 thru -1 of (u as text)
-  end repeat
-  set picked to choose from list repos with title "Review PR" with prompt "This PR title matches several repos. Which one?"
-  if picked is false then return ""
-  return "https://github.com/" &amp; (item 1 of picked)
-end run
-CHOOSE
-    }
-}
-export PATH=/opt/homebrew/bin:$PATH  # Services run with a minimal PATH; gh lives here
 url=$(pr_from "$*")
-[[ -n $url ]] || url=$(pr_from_title "$*")
 [[ -n $url ]] || url=$(pr_from "$(pbpaste)")
 if [[ -z $url ]]; then
-  osascript -e 'display notification "No GitHub PR link in the selection or on the clipboard" with title "Review PR"'
+  osascript -e 'display notification "No GitHub PR link found. Copy the link first (right-click → Copy Link)" with title "Review PR"'
   exit 0
 fi
 # Login shell so prr finds gh, fzf, delta and glow on the Homebrew PATH.
