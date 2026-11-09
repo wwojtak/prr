@@ -78,7 +78,7 @@ if [[ -z $url ]]; then
 fi
 # Login shell so prr finds gh, fzf, delta and glow on the Homebrew PATH.
 # The window is created before iTerm is activated: activating first makes macOS jump to the Space
-# with iTerm's other windows. The "PR Review" profile opens it on the screen with the mouse.
+# with iTerm's other windows. The "PR Review" profile opens it on the main display (the one with the menu bar).
 osascript - "$url" &lt;&lt;'APPLESCRIPT'
 on run argv
   tell application "iTerm2"
